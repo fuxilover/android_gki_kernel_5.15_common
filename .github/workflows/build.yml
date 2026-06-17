@@ -1,7 +1,7 @@
 name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
 
 on:
-  workflow_dispatch: # Кнопка ручного запуска в панели управления Actions
+  workflow_dispatch: # Явный триггер кнопки запуска
 
 jobs:
   build:
@@ -28,57 +28,64 @@ jobs:
       run: |
         mkdir -p kernel-workspace
         cd kernel-workspace
-        
-        # Клонируем ваше дерево ядра сразу в папку common
+
+        # Клонируем ваш форк ядра (hfdem -> fuxilover)
         git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
-        
-        # Скачиваем официальные скрипты сборки ядра от Google
+
+        # Скачиваем официальные скрипты сборки от Google
         git clone https://android.googlesource.com/kernel/build --depth=1
-        
-        # Скачиваем GCC кросс-компиляторы для архитектуры arm/arm64
+
+        # Скачиваем GCC кросс-компиляторы
         git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1
         git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1
-        
-        # Скачиваем стабильный тулчейн Proton Clang для компиляции
+
+        # Скачиваем Proton Clang
         git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
         cd kernel-workspace
-        
-        # 1. Интеграция KernelSU Next напрямую из официального репозитория через Git
-        echo "[+] Интеграция KernelSU Next..."
-        rm -rf common/drivers/kernelsu
-        git clone https://github.com/rifsxd/KernelSU-Next.git common/drivers/kernelsu -b next --depth=1
-        
-        # Встраиваем KernelSU в конфигурацию сборки драйверов ядра
-        grep -q "kernelsu" common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
-        grep -q "kernelsu" common/drivers/Makefile || echo "obj-y += drivers/kernelsu/" >> common/drivers/Makefile
 
-        # 2. Загрузка и подготовка патчей SUSFS
-        echo "[+] Загрузка патчей SUSFS..."
+        # 1. Интеграция KernelSU Next
+        # ИСПРАВЛЕНО: ветка "main" не существует у KernelSU-Next, актуальная — "next"
+        cd common
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        cd ..
+
+        # 2. Загрузка патчей SUSFS
         rm -rf susfs4ksu
         git clone https://github.com/sidex15/susfs4ksu.git
-        
-        # Копируем файлы ядра SUSFS в дерево исходников
+
+        echo "=== Доступные файлы kernel_patches (для сверки маски поиска) ==="
+        ls -la susfs4ksu/kernel_patches/ 2>/dev/null || true
+        echo "=== Доступные файлы ksu_patches ==="
+        ls -la susfs4ksu/ksu_patches/ 2>/dev/null || true
+
         cp susfs4ksu/kernel_patches/fs/susfs.c common/fs/
         cp susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
 
-        # Применяем патч к ядру 5.15
+        # Применение патчей
         cd common
-        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" | head -n 1)
-        echo "[+] Применяем патч к ядру: $SUSFS_PATCH"
+
+        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -maxdepth 1 -name "*5.15*.patch" | head -n 1)
+        if [ -z "$SUSFS_PATCH" ]; then
+          echo "ОШИБКА: не найден SUSFS-патч под 5.15. Сверьтесь со списком файлов выше и пропишите точное имя вручную."
+          exit 1
+        fi
+        echo "Применяю SUSFS-патч: $SUSFS_PATCH"
         patch -p1 < "$SUSFS_PATCH"
 
-        # Применяем патч совместимости к KernelSU Next
         cd drivers/kernelsu
         KSUN_SUSFS_PATCH=$(find ../../../susfs4ksu/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
-        echo "[+] Применяем патч к KernelSU Next: $KSUN_SUSFS_PATCH"
+        if [ -z "$KSUN_SUSFS_PATCH" ]; then
+          echo "ОШИБКА: не найден KSU-SUSFS патч. Сверьтесь со списком файлов выше и пропишите точное имя вручную."
+          exit 1
+        fi
+        echo "Применяю KSU-SUSFS патч: $KSUN_SUSFS_PATCH"
         patch -p1 < "$KSUN_SUSFS_PATCH"
         cd ../..
 
-        # 3. Принудительная активация модулей в файле конфигурации ядра (gki_defconfig)
-        echo "[+] Активация модулей в gki_defconfig..."
+        # 3. Настройка gki_defconfig
         DEFCONFIG="arch/arm64/configs/gki_defconfig"
         echo "CONFIG_KSU=y" >> $DEFCONFIG
         echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
@@ -89,21 +96,27 @@ jobs:
     - name: Execute GKI Build Process
       run: |
         cd kernel-workspace
-        
-        # Экспортируем пути к нашему кастомному компилятору Clang и утилитам GCC
+
+        # Настройка путей компилятора
         export PATH="$(pwd)/clang-bin/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-elf-
         export CROSS_COMPILE_ARM32=arm-eabi-
-        
-        # Запуск официального скрипта сборки Google GKI
-        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
+
+        # ИСПРАВЛЕНО: файл называется build.config.gki.aarch64, а не build.config.gki.arm64
+        BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+
+        echo "=== Реальная структура out/ после сборки (проверьте, совпадает ли с путём в upload-artifact) ==="
+        find out -maxdepth 2 -type d
 
     - name: Upload Compiled Kernel Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: GKI-Kernel-Xiaomi13
+        # ИСПРАВЛЕНО: ядро hfdem собрано на ветке android13-5.15, а не android14-5.15.
+        # Если в логе шага "Execute GKI Build Process" (find out -maxdepth 2) увидите другое имя папки —
+        # замените android13-5.15 ниже на то имя, которое реально появилось.
         path: |
-          kernel-workspace/out/android14-5.15/dist/Image
-          kernel-workspace/out/android14-5.15/dist/Image.lz4
-          kernel-workspace/out/android14-5.15/dist/Image.gz
+          kernel-workspace/out/android13-5.15/dist/Image
+          kernel-workspace/out/android13-5.15/dist/Image.lz4
+          kernel-workspace/out/android13-5.15/dist/Image.gz
