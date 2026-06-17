@@ -27,12 +27,12 @@ jobs:
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
 
-    - name: Initialize GKI Workspace
+   - name: Initialize GKI Workspace
       run: |
         mkdir -p kernel-workspace && cd kernel-workspace
         git config --global user.name "GitHub Action"
         git config --global user.email "action@github.com"
-        repo init -u https://android.googlesource.com/kernel/manifest -b android14-5.15 --depth=1
+        repo init -u https://android.googlesource.com/kernel/manifest -b common-android-mainline-5.15 --depth=1
         repo sync -j$(nproc) --no-tags --no-clone-bundle
 
     - name: Integrate Target Vendor Common Kernel
