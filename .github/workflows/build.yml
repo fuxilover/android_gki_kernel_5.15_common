@@ -8,22 +8,18 @@ jobs:
     name: Build Kernel (arm64)
     runs-on: ubuntu-22.04
     steps:
-    - name: Free Disk Space
-      uses: jlumbroso/free-disk-space@v1.3.1
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        docker-images: true
-        swap-storage: true
-
+    - name: Maximize Build Space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/libexec/docker/cli-plugins/docker-buildx
+        
     - name: Install Build Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y bc bison build-essential curl flex git git-lfs libelf-dev libssl-dev libncurses-dev python3 libarchive-tools
-        
+
     - name: Install Repo Tool
       run: |
         mkdir -p ~/bin
@@ -43,7 +39,7 @@ jobs:
       run: |
         cd kernel-workspace
         rm -rf common
-        git clone https://github.com/hfdem/android_gki_kernel_5.15_common common --depth=1
+        git clone https://github.com/fuxilover/android_gki_kernel_5.15_common common --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
@@ -88,8 +84,7 @@ config KPROFILES
 	  and power profiles efficiently.
 EOF
 
-        echo "obj-\$(CONFIG_KPROFILES) += kprofiles_driver.o" > drivers/misc/kprofiles/Makefile
-        echo "kprofiles_driver-y := kprofiles.o" >> drivers/misc/kprofiles/Makefile
+        echo "obj-\$(CONFIG_KPROFILES) += kprofiles/" > drivers/misc/kprofiles/Makefile
         
         echo "[+] Настройка gki_defconfig..."
         DEFCONFIG="arch/arm64/configs/gki_defconfig"
