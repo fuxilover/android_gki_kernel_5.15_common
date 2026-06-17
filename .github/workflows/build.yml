@@ -1,102 +1,55 @@
-name: Build GKI Kernel with KSU Next, SUSFS & KProfiles
+name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Запуск вручную через вкладку Actions
 
 jobs:
   build:
     name: Build Kernel (arm64)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+
     steps:
     - name: Maximize Build Space
       run: |
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/ghc
-        sudo rm -rf /usr/libexec/docker/cli-plugins/docker-buildx
-        
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+        sudo apt-get clean
+        df -h
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
     - name: Install Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc bison build-essential curl flex git git-lfs libelf-dev libssl-dev libncurses-dev python3 libarchive-tools
+        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git repo python3
 
-    - name: Install Repo Tool
+    - name: Initialize Repo and Sync GKI Source
       run: |
-        mkdir -p ~/bin
-        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-        chmod a+x ~/bin/repo
-        echo "$HOME/bin" >> $GITHUB_PATH
-
-    - name: Initialize GKI Workspace
-      run: |
-        mkdir -p kernel-workspace && cd kernel-workspace
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
-        repo init -u https://android.googlesource.com/kernel/manifest --depth=1
-        repo sync -j$(nproc) --no-tags --no-clone-bundle
-
-    - name: Integrate Target Vendor Common Kernel
-      run: |
-        cd kernel-workspace
+        mkdir kernel-workspace && cd kernel-workspace
+        repo init -u https://android.googlesource.com/kernel/manifest -b android14-5.15 --depth=1
+        repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+        
+        # Заменяем дефолтный common на ваш репозиторий с фиксами под Xiaomi 13
         rm -rf common
-        git clone https://github.com/fuxilover/android_gki_kernel_5.15_common common --depth=1
+        git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
         cd kernel-workspace
         
+        # 1. Интеграция KernelSU Next (через main ветку во избежание pathspec ошибок)
         echo "[+] Интеграция KernelSU Next..."
         cd common
-        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
         cd ..
-        
-        echo "[+] Загрузка патчей SUSFS (GitHub Mirror)..."
+
+        # 2. Клонирование SUSFS со стабильного публичного зеркала GitHub
+        echo "[+] Загрузка патчей SUSFS..."
         rm -rf susfs4ksu
-        git clone https://github.com/Xiaoxindada/susfs4ksu.git --depth=1
+        git clone https://github.com/sidex15/susfs4ksu.git
         
+        # Копирование файлов SUSFS в структуру ядра
         cp susfs4ksu/kernel_patches/fs/susfs.c common/fs/
         cp susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
-        
-        echo "[+] Применение патча SUSFS к ядру..."
-        cd common
-        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" | head -n 1)
-        patch -p1 < "$SUSFS_PATCH"
-        
-        echo "[+] Применение патча SUSFS к KernelSU Next..."
-        cd drivers/kernelsu
-        KSUN_SUSFS_PATCH=$(find ../../../susfs4ksu/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
-        patch -p1 < "$KSUN_SUSFS_PATCH"
-        cd ../..
-        
-        echo "[+] Интеграция KProfiles..."
-        mkdir -p drivers/misc/kprofiles
-        curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.c" -o drivers/misc/kprofiles/kprofiles.c
-        curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.h" -o drivers/misc/kprofiles/kprofiles.h
-        
-        echo 'obj-$(CONFIG_KPROFILES) += kprofiles/' >> drivers/misc/Makefile
-        
-        echo -e '\nconfig KPROFILES\n\tbool "KProfiles support"\n\tdefault y\n\thelp\n\t  KProfiles performance and power management.' >> drivers/misc/Kconfig
-        echo 'obj-$(CONFIG_KPROFILES) += kprofiles_driver.o' > drivers/misc/kprofiles/Makefile
-        echo 'kprofiles_driver-y := kprofiles.o' >> drivers/misc/kprofiles/Makefile
-        
-        echo "[+] Настройка gki_defconfig..."
-        DEFCONFIG="arch/arm64/configs/gki_defconfig"
-        echo "CONFIG_KSU=y" >> $DEFCONFIG
-        echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
-        echo "CONFIG_SUSFS=y" >> $DEFCONFIG
-        echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
-        echo "CONFIG_KPROFILES=y" >> $DEFCONFIG
-
-    - name: Execute GKI Build Process
-      run: |
-        cd kernel-workspace
-        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
-
-    - name: Upload Compiled Kernel Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: GKI-Kernel-Xiaomi13-KSU-Next
-        path: |
-          kernel-workspace/out/android13-5.15/dist/Image
-          kernel-workspace/out/android13-5.15/dist/Image.gz
-          kernel-workspace/out/android13-5.15/dist/Image.lz4
