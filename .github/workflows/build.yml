@@ -50,9 +50,9 @@ jobs:
         curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
         cd ..
         
-        echo "[+] Загрузка патчей SUSFS..."
+        echo "[+] Загрузка патчей SUSFS (GitHub Mirror)..."
         rm -rf susfs4ksu
-        git clone https://gitlab.com/cracky5322/susfs4ksu.git
+        git clone https://github.com/Xiaoxindada/susfs4ksu.git --depth=1
         
         cp susfs4ksu/kernel_patches/fs/susfs.c common/fs/
         cp susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
