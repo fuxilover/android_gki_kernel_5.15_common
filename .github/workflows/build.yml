@@ -1,14 +1,44 @@
-- name: Clone GKI Source and Vendor Tree
+name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
+
+on:
+  workflow_dispatch: # Позволяет запускать сборку кнопкой вручную
+
+jobs:
+  build:
+    name: Build Kernel (arm64)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Maximize Build Space
       run: |
-        mkdir -p kernel-workspace/out
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+        sudo apt-get clean
+        df -h
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git python3 ccache
+
+    - name: Clone GKI Source and Utilities
+      run: |
+        mkdir -p kernel-workspace
         cd kernel-workspace
         
-        # Вместо repo sync просто клонируем ваше ядро сразу в папку common
+        # Клонируем ваше ядро сразу в папку common
         git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
         
-        # Скачиваем утилиты сборки (build-скрипты), которые необходимы для build.sh
-        # Google хранит их в отдельном проекте build
+        # Скачиваем официальные скрипты сборки от Google
         git clone https://android.googlesource.com/kernel/build --depth=1
+        
+        # Скачиваем официальный Clang тулчейн от Google, необходимый для сборки 5.15 ядра
+        mkdir -p prebuilts-master/clang/host/linux-x86
+        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/clang-r450784d prebuilts-master/clang/host/linux-x86/clang-r450784d --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
@@ -51,3 +81,19 @@
         echo "CONFIG_SUSFS=y" >> $DEFCONFIG
         echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
         echo "CONFIG_KPROFILES=y" >> $DEFCONFIG
+
+    - name: Execute GKI Build Process
+      run: |
+        cd kernel-workspace
+        # Указываем путь к скачанному Clang тулчейну для скрипта сборки
+        export PATH="$SIGNAL_BUILD_DIR/prebuilts-master/clang/host/linux-x86/clang-r450784d/bin:$PATH"
+        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
+
+    - name: Upload Compiled Kernel Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: GKI-Kernel-Xiaomi13
+        path: |
+          kernel-workspace/out/android14-5.15/dist/Image
+          kernel-workspace/out/android14-5.15/dist/Image.lz4
+          kernel-workspace/out/android14-5.15/dist/Image.gz
