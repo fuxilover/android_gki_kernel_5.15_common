@@ -73,18 +73,11 @@ jobs:
         curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.c" -o drivers/misc/kprofiles/kprofiles.c
         curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.h" -o drivers/misc/kprofiles/kprofiles.h
         
-        echo "obj-\$(CONFIG_KPROFILES) += kprofiles/" >> drivers/misc/Makefile
+        echo 'obj-$(CONFIG_KPROFILES) += kprofiles/' >> drivers/misc/Makefile
         
-        cat << 'EOF' >> drivers/misc/Kconfig
-config KPROFILES
-	bool "KProfiles support"
-	default y
-	help
-	  KProfiles is a kernel-level solution to manage device performance 
-	  and power profiles efficiently.
-EOF
-
-        echo "obj-\$(CONFIG_KPROFILES) += kprofiles/" > drivers/misc/kprofiles/Makefile
+        echo -e '\nconfig KPROFILES\n\tbool "KProfiles support"\n\tdefault y\n\thelp\n\t  KProfiles performance and power management.' >> drivers/misc/Kconfig
+        echo 'obj-$(CONFIG_KPROFILES) += kprofiles_driver.o' > drivers/misc/kprofiles/Makefile
+        echo 'kprofiles_driver-y := kprofiles.o' >> drivers/misc/kprofiles/Makefile
         
         echo "[+] Настройка gki_defconfig..."
         DEFCONFIG="arch/arm64/configs/gki_defconfig"
