@@ -1,31 +1,4 @@
-name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
-
-on:
-  workflow_dispatch: # Позволяет запускать сборку кнопкой вручную
-
-jobs:
-  build:
-    name: Build Kernel (arm64)
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Maximize Build Space
-      run: |
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
-        sudo apt-get clean
-        df -h
-
-    - name: Configure Git
-      run: |
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
-
-    - name: Install Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git python3 ccache
-
-    - name: Clone GKI Source and Utilities
+- name: Clone GKI Source and Utilities
       run: |
         mkdir -p kernel-workspace
         cd kernel-workspace
@@ -36,9 +9,15 @@ jobs:
         # Скачиваем официальные скрипты сборки от Google
         git clone https://android.googlesource.com/kernel/build --depth=1
         
-        # Скачиваем официальный Clang тулчейн от Google, необходимый для сборки 5.15 ядра
-        mkdir -p prebuilts-master/clang/host/linux-x86
-        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/clang-r450784d prebuilts-master/clang/host/linux-x86/clang-r450784d --depth=1
+        # Скачиваем легковесный и готовый prebuilt-тулчейн (Clang 14/15 + binutils) для GKI 5.15
+        echo "[+] Скачивание тулчейна компилятора..."
+        mkdir -p prebuilts/clang/host/linux-x86
+        git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1
+        git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1
+        
+        # Качаем чистый Clang, который используется в GKI 5.15 (r450784d / Clang 14)
+        git clone https://gitlab.com/ZyCromerZ/Clang/--generic/-/tree/main clang-bin --depth=1 || \
+        git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
@@ -62,13 +41,11 @@ jobs:
         # Применение патча к ядру 5.15
         cd common
         SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" | head -n 1)
-        echo "[+] Применяем патч ядра SUSFS: $SUSFS_PATCH"
         patch -p1 < "$SUSFS_PATCH"
 
         # Применение патча к KernelSU Next
         cd drivers/kernelsu
         KSUN_SUSFS_PATCH=$(find ../../../susfs4ksu/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
-        echo "[+] Применяем патч SUSFS к KernelSU: $KSUN_SUSFS_PATCH"
         patch -p1 < "$KSUN_SUSFS_PATCH"
         cd ../..
 
@@ -85,15 +62,13 @@ jobs:
     - name: Execute GKI Build Process
       run: |
         cd kernel-workspace
-        # Указываем путь к скачанному Clang тулчейну для скрипта сборки
-        export PATH="$SIGNAL_BUILD_DIR/prebuilts-master/clang/host/linux-x86/clang-r450784d/bin:$PATH"
+        
+        # Прописываем пути к скачанным компиляторам в PATH
+        export PATH="$(pwd)/clang-bin/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
+        
+        # Переменные сборки для использования внешнего Clang вместо дефолтных путей Google
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-elf-
+        export CROSS_COMPILE_ARM32=arm-eabi-
+        
         BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
-
-    - name: Upload Compiled Kernel Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: GKI-Kernel-Xiaomi13
-        path: |
-          kernel-workspace/out/android14-5.15/dist/Image
-          kernel-workspace/out/android14-5.15/dist/Image.lz4
-          kernel-workspace/out/android14-5.15/dist/Image.gz
