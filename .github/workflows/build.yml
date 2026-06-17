@@ -1,0 +1,114 @@
+name: Build GKI Kernel with KSU Next, SUSFS & KProfiles
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Kernel (arm64)
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@v1.3.1
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential curl flex git git-lfs libelf-dev libssl-dev libncurses-dev python3 libarchive-tools
+        
+    - name: Install Repo Tool
+      run: |
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo "$HOME/bin" >> $GITHUB_PATH
+
+    - name: Initialize GKI Workspace
+      run: |
+        mkdir -p kernel-workspace && cd kernel-workspace
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+        repo init -u https://android.googlesource.com/kernel/manifest -b android14-5.15 --depth=1
+        repo sync -j$(nproc) --no-tags --no-clone-bundle
+
+    - name: Integrate Target Vendor Common Kernel
+      run: |
+        cd kernel-workspace
+        rm -rf common
+        git clone https://github.com/hfdem/android_gki_kernel_5.15_common common --depth=1
+
+    - name: Patch KernelSU Next, SUSFS, and KProfiles
+      run: |
+        cd kernel-workspace
+        
+        echo "[+] Интеграция KernelSU Next..."
+        cd common
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        cd ..
+        
+        echo "[+] Загрузка патчей SUSFS..."
+        rm -rf susfs4ksu
+        git clone https://gitlab.com/cracky5322/susfs4ksu.git
+        
+        cp susfs4ksu/kernel_patches/fs/susfs.c common/fs/
+        cp susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
+        
+        echo "[+] Применение патча SUSFS к ядру..."
+        cd common
+        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" | head -n 1)
+        patch -p1 < "$SUSFS_PATCH"
+        
+        echo "[+] Применение патча SUSFS к KernelSU Next..."
+        cd drivers/kernelsu
+        KSUN_SUSFS_PATCH=$(find ../../../susfs4ksu/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
+        patch -p1 < "$KSUN_SUSFS_PATCH"
+        cd ../..
+        
+        echo "[+] Интеграция KProfiles..."
+        mkdir -p drivers/misc/kprofiles
+        curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.c" -o drivers/misc/kprofiles/kprofiles.c
+        curl -LSs "https://raw.githubusercontent.com/GhosT-X-Kernel/market_drivers_kprofiles/main/kprofiles.h" -o drivers/misc/kprofiles/kprofiles.h
+        
+        echo "obj-\$(CONFIG_KPROFILES) += kprofiles/" >> drivers/misc/Makefile
+        
+        cat << 'EOF' >> drivers/misc/Kconfig
+config KPROFILES
+	bool "KProfiles support"
+	default y
+	help
+	  KProfiles is a kernel-level solution to manage device performance 
+	  and power profiles efficiently.
+EOF
+
+        echo "obj-\$(CONFIG_KPROFILES) += kprofiles_driver.o" > drivers/misc/kprofiles/Makefile
+        echo "kprofiles_driver-y := kprofiles.o" >> drivers/misc/kprofiles/Makefile
+        
+        echo "[+] Настройка gki_defconfig..."
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        echo "CONFIG_KSU=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
+        echo "CONFIG_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KPROFILES=y" >> $DEFCONFIG
+
+    - name: Execute GKI Build Process
+      run: |
+        cd kernel-workspace
+        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
+
+    - name: Upload Compiled Kernel Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: GKI-Kernel-Xiaomi13-KSU-Next
+        path: |
+          kernel-workspace/out/android13-5.15/dist/Image
+          kernel-workspace/out/android13-5.15/dist/Image.gz
+          kernel-workspace/out/android13-5.15/dist/Image.lz4
