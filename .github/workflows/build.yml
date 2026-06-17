@@ -1,51 +1,26 @@
-name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
-
-on:
-  workflow_dispatch: # Запуск вручную через вкладку Actions
-
-jobs:
-  build:
-    name: Build Kernel (arm64)
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Maximize Build Space
+- name: Clone GKI Source and Vendor Tree
       run: |
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
-        sudo apt-get clean
-        df -h
-
-    - name: Configure Git
-      run: |
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
-
-    - name: Install Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git repo python3
-
-    - name: Initialize Repo and Sync GKI Source
-      run: |
-        mkdir kernel-workspace && cd kernel-workspace
-        repo init -u https://android.googlesource.com/kernel/manifest -b android14-5.15 --depth=1
-        repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+        mkdir -p kernel-workspace/out
+        cd kernel-workspace
         
-        # Заменяем дефолтный common на ваш репозиторий с фиксами под Xiaomi 13
-        rm -rf common
+        # Вместо repo sync просто клонируем ваше ядро сразу в папку common
         git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
+        
+        # Скачиваем утилиты сборки (build-скрипты), которые необходимы для build.sh
+        # Google хранит их в отдельном проекте build
+        git clone https://android.googlesource.com/kernel/build --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
         cd kernel-workspace
         
-        # 1. Интеграция KernelSU Next (через main ветку во избежание pathspec ошибок)
+        # 1. Интеграция KernelSU Next
         echo "[+] Интеграция KernelSU Next..."
         cd common
         curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
         cd ..
 
-        # 2. Клонирование SUSFS со стабильного публичного зеркала GitHub
+        # 2. Загрузка патчей SUSFS
         echo "[+] Загрузка патчей SUSFS..."
         rm -rf susfs4ksu
         git clone https://github.com/sidex15/susfs4ksu.git
@@ -53,3 +28,26 @@ jobs:
         # Копирование файлов SUSFS в структуру ядра
         cp susfs4ksu/kernel_patches/fs/susfs.c common/fs/
         cp susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
+
+        # Применение патча к ядру 5.15
+        cd common
+        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" | head -n 1)
+        echo "[+] Применяем патч ядра SUSFS: $SUSFS_PATCH"
+        patch -p1 < "$SUSFS_PATCH"
+
+        # Применение патча к KernelSU Next
+        cd drivers/kernelsu
+        KSUN_SUSFS_PATCH=$(find ../../../susfs4ksu/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
+        echo "[+] Применяем патч SUSFS к KernelSU: $KSUN_SUSFS_PATCH"
+        patch -p1 < "$KSUN_SUSFS_PATCH"
+        cd ../..
+
+        # 3. Настройка конфигурации (gki_defconfig)
+        echo "[+] Активация модулей в gki_defconfig..."
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        
+        echo "CONFIG_KSU=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
+        echo "CONFIG_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KPROFILES=y" >> $DEFCONFIG
