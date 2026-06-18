@@ -1,159 +1,70 @@
-name: Build Kernel (arm64)
+name: Build hfdem Kernel with SUSFS
 
 on:
-  workflow_dispatch: # Кнопка ручного запуска в интерфейсе GitHub
+  workflow_dispatch: # Запуск по кнопке из вкладки Actions
 
 jobs:
-  build_kernel:
-    runs-on: ubuntu-latest
-
+  build:
+    name: Compile Kernel
+    runs-on: ubuntu-22.04
+    
     steps:
-    # ── 1. СКАЧИВАЕМ ИСХОДНИКИ ЯДРА ──────────────────────────────────────────
-    - name: Checkout Kernel Source
+    - name: 📥 Checkout Kernel Source
       uses: actions/checkout@v4
       with:
-        repository: fuxilover/android_gki_kernel_5.15_common
-        ref: android13-5.15-2025-05
+        submodules: recursive
         fetch-depth: 1
 
-    - name: Configure Git
+    - name: ⚙️ Setup Build Environment
       run: |
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
-
-    # ── 2. ОЧИСТКА ДИСКА ДЛЯ СБОРКИ ──────────────────────────────────────────
-    - name: Free Disk Space
-      run: |
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
-        sudo apt-get clean
-
-    # ── 3. УСТАНОВКА НЕОБХОДИМЫХ ПАКЕТОВ ─────────────────────────────────────
-    - name: Install Dependencies
-      run: |
+        echo "Установка зависимостей..."
         sudo apt-get update
-        sudo apt-get install -y \
-          bc bison build-essential flex \
-          libssl-dev libelf-dev xz-utils \
-          curl git python3 ccache patch \
-          cpio rsync
-
-    # ── 4. ПОДГОТОВКА СТРУКТУРЫ И KERNELSU-NEXT ──────────────────────────────
-    - name: Setup Toolchains and KernelSU-Next
+        sudo apt-get install -y build-essential bc zip gcc clang lld binutils-aarch64-linux-gnu curl git wget python3
+        
+    - name: 🛠️ Download Toolchain (Proton Clang)
       run: |
-        set -x
-        
-        # 1. Создаем чистый воркспейс для сборщика Google
-        mkdir -p kernel-workspace/common
-        
-        # 2. Безопасно перемещаем исходники ядра в kernel-workspace/common
-        find . -maxdepth 1 ! -name '.' ! -name 'kernel-workspace' -exec mv {} kernel-workspace/common/ \;
+        echo "Скачивание компилятора..."
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
 
-        cd kernel-workspace
-        
-        echo "=== Cloning Build Scripts and Toolchains ==="
-        # Скрипты сборки от Google (клонируются рядом с папкой common)
-        git clone https://android.googlesource.com/kernel/build --branch master-kernel-build-2022 --depth=1 --single-branch
-
-        # Скачиваем компиляторы (в корень воркспейса)
-        git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1 --single-branch --no-tags
-        git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1 --single-branch --no-tags
-        git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1 --single-branch --no-tags
-
-        echo "=== Installing Official KernelSU-Next ==="
-        cd common
-        
-        # Сбрасываем временный HOME, чтобы скрипт установки отработал корректно
-        export HOME=/home/runner
-        
-        # Интеграция KernelSU-Next с использованием официального скрипта из документации
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
-
-        # Проверка, что интеграция прошла успешно
-        if [ ! -d "drivers/kernelsu" ]; then
-          echo "ERROR: KernelSU-Next installation failed!"
-          exit 1
-        fi
-
-        cd ..
-        echo "=== Workspace Ready ==="
-
-    # ── 5. ЗАПУСК КОМПИЛЯЦИИ ЯДРА ───────────────────────────────────────────
-    - name: Run Kernel Build
+    - name: 💉 Inject SUSFS Patch (On-the-fly)
       run: |
-        cd kernel-workspace
+        echo "Интеграция SUSFS в исходный код ядра..."
+        # Скачиваем официальные патчи simonpunk
+        git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git
         
-        # 1. Экспортируем абсолютные пути к скачанным тулчейнам
-        export CLANG_ROOT="$(pwd)/clang-bin"
-        export PATH="$CLANG_ROOT/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
+        # Применяем патч для ветки GKI 5.15
+        patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_kernel-gki-android12-5.15.patch
         
-        # 2. Переменные окружения для сборщика Google
+        # Переносим заголовочный файл и файл с логикой
+        cp susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
+        cp susfs4ksu/kernel_patches/fs/susfs.c fs/
+        
+        echo "Патч SUSFS успешно применён!"
+
+    - name: 🔨 Compile Kernel
+      run: |
+        echo "Запуск компиляции..."
+        
+        # Настройка путей и переменных окружения
+        export PATH="$(pwd)/toolchain/bin:$PATH"
         export ARCH=arm64
-        export SUBARCH=arm64
-        export HEADER_ARCH=arm64
-        
-        # 3. Указываем параметры кросс-компиляции для Proton Clang
-        export CROSS_COMPILE=aarch64-elf-
-        export CROSS_COMPILE_ARM32=arm-eabi-
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
         export CC=clang
         export LD=ld.lld
         export AR=llvm-ar
         export NM=llvm-nm
         export OBJCOPY=llvm-objcopy
         export OBJDUMP=llvm-objdump
-        export READELF=llvm-readelf
         export STRIP=llvm-strip
-        
-        # 4. ВЫРЕЗАЕМ ПРОВЕРКУ NDK ИЗ КОНФИГУРАЦИИ СБОРКИ
-        sed -i '/NDK_TRIPLE/d' common/build.config.gki.aarch64
-        
-        # На всякий случай сбрасываем в окружении bash
-        unset NDK_TRIPLE
-        export USES_NDK=0
-        
-        # Даем права на исполнение главному билд-скрипту Google
-        chmod +x build/build.sh
-        
-        # 5. Запуск сборки с явным указанием конфигурационного файла GKI ядра
-        BUILD_CONFIG=common/build.config.gki.aarch64 ./build/build.sh
+        export LLVM=1
+        export LLVM_IAS=1
 
-    # ── 6. КЛОНИРОВАНИЕ И СБОРКА SUKISU KERNELPATCH ПАТЧЕРА ────────────────
-    - name: Clone and Build SukiSU KernelPatch
-      run: |
-        # Клонируем официальный репозиторий патчера для KPM
-        git clone --recursive https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch.git kp-patcher
-        cd kp-patcher
-        
-        # Собираем kpatch под Linux-хост CI (архитектура x86_64)
-        make -j$(nproc)
-        
-        # Создаем папку бинов в воркспейсе ядра, если её нет, и копируем kpatch туда
-        mkdir -p ../kernel-workspace/out/bin
-        cp out/kpatch ../kernel-workspace/out/bin/kpatch
-        
-        cd ../kernel-workspace/out/bin
-        chmod +x kpatch
-        ./kpatch --version || true
+        # Очистка рабочей директории
+        make O=out clean
+        make O=out mrproper
 
-    # ── 7. СТАТИЧЕСКИЙ ПАТЧИНГ ОБРАЗА ЯДРА ПОД KPM ─────────────────────────
-    - name: Patch Kernel Image with KernelPatch for SukiSU KPM
-      run: |
-        cd kernel-workspace
-        
-        # Пытаемся автоматически найти собранный Image в директориях out/
-        KERNEL_IMAGE=$(find out/ -type f -name "Image" | head -n 1)
-        KPATCH_BIN="$(pwd)/out/bin/kpatch"
-        
-        if [ -n "$KERNEL_IMAGE" ] && [ -f "$KERNEL_IMAGE" ]; then
-          echo "[+] Найдено собранное ядро по пути: $KERNEL_IMAGE"
-          echo "[+] Начинаем патчинг под SukiSU KPM..."
-          
-          # Вызов kpatch для статической модификации
-          $KPATCH_BIN patch -i "$KERNEL_IMAGE" -o "${KERNEL_IMAGE}-patched"
-          
-          # Заменяем оригинальное ядро пропатченной версией
-          mv "${KERNEL_IMAGE}-patched" "$KERNEL_IMAGE"
-          echo "[+] Ядро успешно пропатчено!"
-        else
-          echo "[-] Ошибка: Исходный образ ядра (Image) не найден в папке out/"
-          exit 1
-        fi
+        # Генерация конфига
+        # ВАЖНО: Если hfdem использует кастомный конфиг (например, kalama_defconfig для Xiaomi 13), 
+        # замени gki_defconfig ниже на нужное название.
+        make O=out gki_defconfig
