@@ -1,99 +1,110 @@
-name: Build Android GKI 5.15
+name: Build Kernel (arm64)
 
+# Триггеры запуска
 on:
-workflow_dispatch:
+  workflow_dispatch: # ЭТОТ БЛОК ОБЯЗАТЕЛЕН, чтобы появилась кнопка "Run workflow"
 
 jobs:
-build:
-runs-on: ubuntu-24.04
+  build_kernel:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # ── 1. ПОДГОТОВКА ОКРУЖЕНИЯ ГИТА ────────────────────────────────────────
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-```
-steps:
-  - name: Checkout
-    uses: actions/checkout@v4
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
 
-  - name: Free disk space
-    run: |
-      sudo rm -rf /usr/share/dotnet
-      sudo rm -rf /opt/ghc
-      sudo docker system prune -af || true
+    # ── 2. ОЧИСТКА ДИСКА (ЧТОБЫ ХВАТИЛО МЕСТА) ──────────────────────────────
+    - name: Free Disk Space
+      run: |
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+        sudo apt-get clean
+        df -h
 
-  - name: Install dependencies
-    run: |
-      sudo apt update
+    # ── 3. УСТАНОВКА ЗАВИСИМОСТЕЙ СБОРКИ ─────────────────────────────────────
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential flex \
+          libssl-dev libelf-dev xz-utils \
+          curl git python3 ccache patch \
+          cpio rsync
 
-      sudo apt install -y \
-        bc \
-        bison \
-        build-essential \
-        ccache \
-        curl \
-        flex \
-        git \
-        libelf-dev \
-        libssl-dev \
-        lz4 \
-        pahole \
-        python3 \
-        rsync \
-        unzip \
-        wget \
-        zip
+    # ── 4. КЛОНИРОВАНИЕ И НАСТРОЙКА ИСХОДНИКОВ (С ОПТИМИЗАЦИЕЙ RAM) ─────────
+    - name: Clone Toolchains, Setup KernelSU-Next and Patch SUSFS
+      run: |
+        set -x
 
-  - name: Clone Android build tools
-    run: |
-      git clone \
-        --depth=1 \
-        https://android.googlesource.com/kernel/build
+        mkdir -p kernel-workspace
+        cd kernel-workspace
 
-  - name: Clone Proton Clang
-    run: |
-      git clone \
-        --depth=1 \
-        https://github.com/kdrag0n/proton-clang.git clang
+        echo "=== Cloning sources and toolchains ==="
+        # Клонируем ядро (ветка по умолчанию fuxilover)
+        git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1 --single-branch
 
-  - name: Setup SukiSU Ultra
-    run: |
-      curl -LSs \
-      https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
-      | bash
+        # Скрипты сборки от Google
+        git clone https://android.googlesource.com/kernel/build --branch master-kernel-build-2022 --depth=1 --single-branch
 
-  - name: Show kernel info
-    run: |
-      pwd
-      ls -la
-      find . -maxdepth 2 -type f | sort | head -200
+        # Оптимизированное клонирование компиляторов (без лишней истории и тегов)
+        git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1 --single-branch --no-tags
+        git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1 --single-branch --no-tags
+        git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1 --single-branch --no-tags
 
-  - name: Export toolchain
-    run: |
-      echo "$(pwd)/clang/bin" >> $GITHUB_PATH
+        if [ ! -f build/build.sh ]; then
+          echo "ERROR: build/build.sh not found."
+          exit 1
+        fi
 
-  - name: Build kernel
-    run: |
-      export ARCH=arm64
-      export SUBARCH=arm64
+        echo "=== Setting up KernelSU-Next ==="
+        cd common
+        # Ставим KernelSU-Next (мягкий запуск || true, чтобы не падать на предупреждениях скрипта)
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || true
+        cd ..
 
-      if [ -f build/build.sh ]; then
-        build/build.sh
-      else
-        echo "build/build.sh not found"
-        exit 1
-      fi
+        # Проверка создания симлинка/папки
+        if [ ! -L common/drivers/kernelsu ] && [ ! -d common/drivers/kernelsu ]; then
+          echo "ERROR: KernelSU directory/symlink is missing!"
+          exit 1
+        fi
 
-  - name: Collect artifacts
-    run: |
-      mkdir -p out_artifacts
+        echo "=== Cloning and applying SUSFS ==="
+        rm -rf susfs4ksu
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 --depth=1 --single-branch
 
-      find . -type f \( \
-        -name "Image" -o \
-        -name "Image.gz" -o \
-        -name "Image.lz4" -o \
-        -name "*.ko" \
-      \) -exec cp {} out_artifacts/ \; || true
+        # Копируем новые файлы SUSFS в исходники ядра
+        cp -f susfs4ksu/kernel_patches/fs/*.c common/fs/
+        cp -f susfs4ksu/kernel_patches/include/linux/*.h common/include/linux/
 
-  - name: Upload artifacts
-    uses: actions/upload-artifact@v4
-    with:
-      name: kernel-build
-      path: out_artifacts
-```
+        cd common
+
+        # Определяем правильный патч (приоритет патчу под KernelSU-Next)
+        SUSFS_PATCH="../susfs4ksu/kernel_patches/5.15/0001-KsNext-add-susfs-v1.5.x-to-gki-android13-5.15.patch"
+
+        if [ ! -f "$SUSFS_PATCH" ]; then
+          echo "KsNext patch not found, switching to generic 5.15 GKI patch..."
+          SUSFS_PATCH="../susfs4ksu/kernel_patches/5.15/0001-add-susfs-v1.5.x-to-gki-android13-5.15.patch"
+        fi
+
+        # Применяем патч без риска зависания (--batch)
+        if [ -f "$SUSFS_PATCH" ]; then
+          echo "Applying: $SUSFS_PATCH"
+          patch -p1 --batch --forward < "$SUSFS_PATCH"
+        else
+          echo "ERROR: No SUSFS patch file found!"
+          exit 1
+        fi
+
+        cd ..
+        echo "=== Workspace preparation completed successfully ==="
+
+    # ── 5. ШАГ СБОРКИ (ДОБАВЬТЕ СЮДА ВАШУ КОМАНДУ ИЗ КОРНЯ WORKSPACE) ───────
+    # - name: Run Kernel Build
+    #   run: |
+    #     cd kernel-workspace
+    #     # Сюда впишите вашу команду сборки, например:
+    #     # BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
