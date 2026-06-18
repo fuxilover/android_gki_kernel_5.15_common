@@ -1,4 +1,43 @@
-# ── 4. ПОДГОТОВКА СТРУКТУРЫ, KERNELSU-NEXT И KPROFILES ───────────────────
+name: Build Kernel (arm64)
+
+on:
+  workflow_dispatch: # Кнопка ручного запуска в интерфейсе GitHub
+
+jobs:
+  build_kernel:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # ── 1. СКАЧИВАЕМ ИСХОДНИКИ ЯДРА ──────────────────────────────────────────
+    - name: Checkout Kernel Source
+      uses: actions/checkout@v4
+      with:
+        repository: fuxilover/android_gki_kernel_5.15_common
+        ref: android13-5.15-2025-05
+        fetch-depth: 1
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+
+    # ── 2. ОЧИСТКА ДИСКА ДЛЯ СБОРКИ ──────────────────────────────────────────
+    - name: Free Disk Space
+      run: |
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+        sudo apt-get clean
+
+    # ── 3. УСТАНОВКА НЕОБХОДИМЫХ ПАКЕТОВ ─────────────────────────────────────
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential flex \
+          libssl-dev libelf-dev xz-utils \
+          curl git python3 ccache patch \
+          cpio rsync
+
+    # ── 4. ПОДГОТОВКА СТРУКТУРЫ, KERNELSU-NEXT И KPROFILES ───────────────────
     - name: Setup Toolchains, KernelSU-Next and KProfiles
       run: |
         set -x
@@ -6,7 +45,7 @@
         # 1. Создаем чистый воркспейс для сборщика Google
         mkdir -p kernel-workspace/common
         
-        # 2. Безопасно перемещаем исходники ядра в kernel-workspace/common, избегая зацикливания
+        # 2. Безопасно перемещаем исходники ядра в kernel-workspace/common, избегая зацикливания папок
         find . -maxdepth 1 ! -name '.' ! -name 'kernel-workspace' -exec mv {} kernel-workspace/common/ \;
 
         cd kernel-workspace
@@ -23,7 +62,7 @@
         echo "=== Installing Official KernelSU-Next ==="
         cd common
         
-        # Переключаем временный HOME обратно, чтобы утилиты не путались в путях внутри репозитория
+        # Сбрасываем временный HOME, чтобы скрипт установки отработал корректно
         export HOME=/home/runner
         
         # Интеграция KernelSU-Next с использованием официального скрипта из документации
@@ -53,3 +92,11 @@
 
         cd ..
         echo "=== Workspace Ready ==="
+
+    # ── 5. ЗАПУСК КОМПИЛЯЦИИ ЯДРА ───────────────────────────────────────────
+    - name: Run Kernel Build
+      run: |
+        cd kernel-workspace
+        
+        # 1. Экспортируем абсолютные пути к скачанным тулчейнам
+        export CLANG_ROOT
