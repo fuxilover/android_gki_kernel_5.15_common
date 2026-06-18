@@ -1,110 +1,99 @@
-name: Build Kernel (arm64)
+name: Build Android GKI 5.15
 
-# Определяем, когда запускать сборку
 on:
-  workflow_dispatch: # ЭТОТ БЛОК ОБЯЗАТЕЛЕН для ручного запуска кнопкой!
-  
-  # Здесь могут оставаться ваши старые триггеры, например:
-  # push:
-  #   branches: [ main ]
+workflow_dispatch:
 
 jobs:
-  build_job:
-    runs-on: ubuntu-latest
-    steps:
-      # ... ваши шаги (checkout, apt-get, клонирование ядра и т.д.)
-- name: Clone Toolchains, Setup KernelSU-Next and Patch SUSFS
-      run: |
-        # Включаем строгий режим: падать при любой ошибке, логировать команды
-        set -euo pipefail
-        set -x
+build:
+runs-on: ubuntu-24.04
 
-        mkdir -p kernel-workspace
-        cd kernel-workspace
+```
+steps:
+  - name: Checkout
+    uses: actions/checkout@v4
 
-        # ── 1. КЛОНИРОВАНИЕ РЕПОЗИТОРИЕВ (ОПТИМИЗИРОВАННОЕ) ───────────────────
-        echo "=== Cloning sources and toolchains ==="
-        
-        # Основное ядро (Common GKI)
-        git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common \
-          --depth=1 --single-branch
+  - name: Free disk space
+    run: |
+      sudo rm -rf /usr/share/dotnet
+      sudo rm -rf /opt/ghc
+      sudo docker system prune -af || true
 
-        # Скрипты сборки Google
-        git clone https://android.googlesource.com/kernel/build \
-          --branch master-kernel-build-2022 --depth=1 --single-branch
+  - name: Install dependencies
+    run: |
+      sudo apt update
 
-        # Кросс-компиляторы GCC (добавляем --no-tags для экономии памяти)
-        git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf \
-          --depth=1 --single-branch --no-tags
-        
-        git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi \
-          --depth=1 --single-branch --no-tags
+      sudo apt install -y \
+        bc \
+        bison \
+        build-essential \
+        ccache \
+        curl \
+        flex \
+        git \
+        libelf-dev \
+        libssl-dev \
+        lz4 \
+        pahole \
+        python3 \
+        rsync \
+        unzip \
+        wget \
+        zip
 
-        # Proton Clang
-        git clone https://github.com/kdrag0n/proton-clang.git clang-bin \
-          --depth=1 --single-branch --no-tags
+  - name: Clone Android build tools
+    run: |
+      git clone \
+        --depth=1 \
+        https://android.googlesource.com/kernel/build
 
-        # Проверяем наличие build.sh перед тем как продолжить
-        if [ ! -f build/build.sh ]; then
-          echo "ERROR: build/build.sh not found after clone."
-          exit 1
-        fi
-        echo "[OK] build/build.sh found."
+  - name: Clone Proton Clang
+    run: |
+      git clone \
+        --depth=1 \
+        https://github.com/kdrag0n/proton-clang.git clang
 
-        # ── 2. НАСТРОЙКА KERNELSU-NEXT ───────────────────────────────────────
-        echo "=== Setting up KernelSU-Next ==="
-        cd common
-        
-        # Скачиваем официальный скрипт установки и запускаем для ветки 'next'
-        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
-        
-        cd ..
+  - name: Setup SukiSU Ultra
+    run: |
+      curl -LSs \
+      https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
+      | bash
 
-        # Проверяем, создалась ли симлинк на kernelsu
-        if [ ! -L common/drivers/kernelsu ]; then
-          echo "ERROR: drivers/kernelsu symlink not created by setup.sh"
-          exit 1
-        fi
-        echo "[OK] drivers/kernelsu symlink present -> $(readlink common/drivers/kernelsu)"
+  - name: Show kernel info
+    run: |
+      pwd
+      ls -la
+      find . -maxdepth 2 -type f | sort | head -200
 
-        # ── 3. КЛОНИРОВАНИЕ И НАЛОЖЕНИЕ ПАТЧЕЙ SUSFS ─────────────────────────
-        echo "=== Cloning and applying SUSFS ==="
-        rm -rf susfs4ksu
-        
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git \
-          -b gki-android13-5.15 --depth=1 --single-branch
+  - name: Export toolchain
+    run: |
+      echo "$(pwd)/clang/bin" >> $GITHUB_PATH
 
-        # Копируем новые исходные файлы SUSFS прямо в дерево ядра
-        cp susfs4ksu/kernel_patches/fs/*.c common/fs/
-        cp susfs4ksu/kernel_patches/include/linux/*.h common/include/linux/
+  - name: Build kernel
+    run: |
+      export ARCH=arm64
+      export SUBARCH=arm64
 
-        # Переходим в репозиторий ядра для применения патчей
-        cd common
+      if [ -f build/build.sh ]; then
+        build/build.sh
+      else
+        echo "build/build.sh not found"
+        exit 1
+      fi
 
-        # Ищем патч ядра SUSFS для KernelSU-Next (обычно идет в комплекте)
-        # В зависимости от репозитория simonpunk, имя файла может слегка отличаться. 
-        # Скрипт проверит стандартный патч для KsNext:
-        
-        SUSFS_PATCH="../susfs4ksu/kernel_patches/5.15/0001-KsNext-add-susfs-v1.5.x-to-gki-android13-5.15.patch"
+  - name: Collect artifacts
+    run: |
+      mkdir -p out_artifacts
 
-        # Если патч именно для KsNext не найден, ищем общий GKI патч для 5.15
-        if [ ! -f "$SUSFS_PATCH" ]; then
-          echo "KsNext-specific SUSFS patch not found. Looking for generic 5.15 GKI patch..."
-          SUSFS_PATCH="../susfs4ksu/kernel_patches/5.15/0001-add-susfs-v1.5.x-to-gki-android13-5.15.patch"
-        fi
+      find . -type f \( \
+        -name "Image" -o \
+        -name "Image.gz" -o \
+        -name "Image.lz4" -o \
+        -name "*.ko" \
+      \) -exec cp {} out_artifacts/ \; || true
 
-        if [ -f "$SUSFS_PATCH" ]; then
-          echo "Applying SUSFS patch: $SUSFS_PATCH"
-          # Флаг --batch предотвращает зависание воркера, если патч потребует ручного ввода
-          # Флаг --forward игнорирует уже примененные патчи
-          patch -p1 --batch --forward < "$SUSFS_PATCH"
-          echo "[OK] SUSFS patch applied successfully."
-        else
-          echo "ERROR: No matching SUSFS patch file found in susfs4ksu/kernel_patches/5.15/"
-          ls -la "../susfs4ksu/kernel_patches/5.15/"
-          exit 1
-        fi
-
-        # Возвращаемся в корень воркспейса
-        cd ..
-        echo "=== Workspace preparation completed successfully ==="
+  - name: Upload artifacts
+    uses: actions/upload-artifact@v4
+    with:
+      name: kernel-build
+      path: out_artifacts
+```
