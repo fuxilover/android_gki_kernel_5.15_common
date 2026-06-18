@@ -25,8 +25,8 @@ jobs:
       run: |
         echo "Скачивание компилятора..."
         git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
-
-  - name: 💉 Inject SUSFS Patch (On-the-fly)
+        
+         - name: 💉 Inject SUSFS Patch (On-the-fly)
       run: |
         echo "Интеграция SUSFS в исходный код ядра..."
         
@@ -41,7 +41,6 @@ jobs:
         cp susfs4ksu/kernel_patches/fs/susfs.c fs/
         
         echo "Патч SUSFS успешно применён!"
-
     - name: 🔨 Compile Kernel
       run: |
         echo "Запуск компиляции..."
