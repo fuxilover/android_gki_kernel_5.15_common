@@ -103,16 +103,16 @@ jobs:
         export READELF=llvm-readelf
         export STRIP=llvm-strip
         
-        # 4. ВЫРЕЗАЕМ ПРОВЕРКУ NDK ИЗ КОНФИГУРАЦИИ СБОРКИ
-        # Удаляем строки, активирующие NDK в build.config GKI ядра
-        sed -i '/NDK_TRIPLE/d' common/build.config.gki.aarch64
+        # 4. УЛЬТИМАТИВНЫЙ ОБХОД ПРОВЕРКИ NDK
+        # Удаляем NDK_TRIPLE из ВСЕХ конфигурационных файлов в папке common/
+        find common/ -type f -name "build.config*" -exec sed -i '/NDK_TRIPLE/d' {} +
         
-        # На всякий случай сбрасываем в окружении bash
-        unset NDK_TRIPLE
-        export USES_NDK=0
-        
-        # Даем права на исполнение главному билд-скрипту Google
+        # Даем права на исполнение билд-скрипту Google
         chmod +x build/build.sh
+        
+        # ХАК: Модифицируем сам скрипт build.sh, чтобы принудительно очистить NDK_TRIPLE внутри него
+        # Вставляем 'unset NDK_TRIPLE' и 'USES_NDK=0' в самое начало скрипта сразу после #!/bin/bash
+        sed -i '2i unset NDK_TRIPLE\nexport USES_NDK=0' build/build.sh
         
         # 5. Запуск сборки с явным указанием конфигурационного файла GKI ядра
         BUILD_CONFIG=common/build.config.gki.aarch64 ./build/build.sh
