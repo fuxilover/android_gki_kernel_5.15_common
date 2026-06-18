@@ -1,106 +1,246 @@
 name: Build Kernel (arm64)
 
 on:
-  workflow_dispatch: # Кнопка ручного запуска в интерфейсе GitHub
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build_kernel:
-    runs-on: ubuntu-latest
-    
+    name: Build Kernel (arm64)
+    runs-on: ubuntu-24.04
+
     steps:
-    # ── 1. СКАЧИВАЕМ ИСХОДНИКИ ЯДРА ──────────────────────────────────────────
-    - name: Checkout Kernel Source
-      uses: actions/checkout@v4
-      with:
-        repository: fuxilover/android_gki_kernel_5.15_common
-        ref: android13-5.15-2025-05
-        fetch-depth: 1
+      # ─── 1. Checkout your kernel fork ────────────────────────────────────
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: fuxilover/android_gki_kernel_5.15_common
+          ref: android13-5.15-2025-05
+          fetch-depth: 1
 
-    - name: Configure Git
-      run: |
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
+      # ─── 2. Configure git identity ────────────────────────────────────────
+      - name: Configure git
+        run: |
+          git config --global user.name  "GitHub Action"
+          git config --global user.email "action@github.com"
 
-    # ── 2. ОЧИСТКА ДИСКА ДЛЯ СБОРКИ ──────────────────────────────────────────
-    - name: Free Disk Space
-      run: |
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
-        sudo apt-get clean
+      # ─── 3. Free disk space ───────────────────────────────────────────────
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php \
+                      /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
 
-    # ── 3. УСТАНОВКА НЕОБХОДИМЫХ ПАКЕТОВ ─────────────────────────────────────
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          bc bison build-essential flex \
-          libssl-dev libelf-dev xz-utils \
-          curl git python3 ccache patch \
-          cpio rsync
+      # ─── 4. Install build dependencies ───────────────────────────────────
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex \
+            libssl-dev libelf-dev xz-utils \
+            curl git python3 ccache patch \
+            cpio rsync
 
-    # ── 4. ПОДГОТОВКА СТРУКТУРЫ, KERNELSU-NEXT И KPROFILES ───────────────────
-    - name: Setup Toolchains, KernelSU-Next and KProfiles
-      run: |
-        set -x
-        
-        # Переносим скачанное ядро в структуру, которую ожидает билд-скрипт Google
-        mkdir -p kernel-workspace
-        mv * kernel-workspace/ 2>/dev/null || true
-        mv .* kernel-workspace/ 2>/dev/null || true
-        
-        cd kernel-workspace
-        mkdir common
-        mv * common/ 2>/dev/null || true
-        mv .* common/ 2>/dev/null || true
-        
-        echo "=== Cloning Build Scripts and Toolchains ==="
-        # Скрипты сборки от Google
-        git clone https://android.googlesource.com/kernel/build --branch master-kernel-build-2022 --depth=1 --single-branch
+      # ─── 5. Reorganise checkout + clone toolchains ───────────────────────
+      - name: Set up workspace
+        run: |
+          set -x
 
-        # Скачиваем компиляторы (Proton Clang и GCC)
-        git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1 --single-branch --no-tags
-        git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1 --single-branch --no-tags
-        git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1 --single-branch --no-tags
+          # actions/checkout puts sources in $GITHUB_WORKSPACE (the cwd).
+          # Google's build.sh expects the layout:
+          #   kernel-workspace/
+          #     common/          <- kernel source
+          #     build/           <- Google build scripts
+          #     clang-bin/       <- Clang toolchain
+          #     prebuilts/gcc/…  <- GCC toolchains
 
-        echo "=== Setting up KernelSU-Next ==="
-        cd common
-        # Ставим официальный KernelSU-Next (ветка 'next')
-        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next || true
-        
-        if [ ! -d "drivers/kernelsu" ] && [ ! -L "drivers/kernelsu" ]; then
-          echo "ERROR: KernelSU-Next setup failed!"
-          exit 1
-        fi
+          mkdir -p kernel-workspace/common
 
-        echo "=== Integrating KProfiles ==="
-        # Скачиваем драйвер KProfiles напрямую в дерево исходников ядра
-        git clone https://github.com/tiann/kprofiles.git drivers/kprofiles --depth=1
-        
-        # Прописываем KProfiles в общую систему сборки драйверов ядра
-        if ! grep -q "kprofiles" drivers/Makefile; then
-          echo "obj-y += kprofiles/" >> drivers/Makefile
-        fi
-        
-        if ! grep -q "kprofiles" drivers/Kconfig; then
-          sed -i '/endmenu/i source "drivers/kprofiles/Kconfig"' drivers/Kconfig
-        fi
+          # Move everything the checkout action placed here into common/
+          # (exclude the workspace dir itself and hidden CI dirs)
+          shopt -s dotglob
+          for item in *; do
+            [ "$item" = "kernel-workspace" ] && continue
+            mv "$item" kernel-workspace/common/
+          done
+          shopt -u dotglob
 
-        # Включаем KProfiles в дефолтной конфигурации нашего GKI ядра
-        echo "CONFIG_KPROFILES=y" >> arch/arm64/configs/gki_defconfig
+          cd kernel-workspace
 
-        cd ..
-        echo "=== Workspace Ready ==="
+          # Google kernel build scripts (branch with build.sh still present)
+          git clone https://android.googlesource.com/kernel/build \
+            --branch master-kernel-build-2022 --depth=1 --single-branch
 
-    # ── 5. ЗАПУСК КОМПИЛЯЦИИ ЯДРА ───────────────────────────────────────────
-    - name: Run Kernel Build
-      run: |
-        cd kernel-workspace
-        
-        # Добавляем все тулчейны в PATH окружения
-        export PATH="$(pwd)/clang-bin/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
-        
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export HEADER_ARCH=arm64
-        
-        # Запуск сборки стандартной конфигурации GKI 
-        BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+          # Verify build.sh is present
+          if [ ! -f build/build.sh ]; then
+            echo "ERROR: build/build.sh not found after clone."
+            ls -la build/
+            exit 1
+          fi
+          echo "[OK] build/build.sh found."
+
+          # GCC cross-compilers
+          git clone https://github.com/mvaisakh/gcc-arm64.git \
+            prebuilts/gcc/linux-x86/aarch64/aarch64-elf \
+            --depth=1 --single-branch --no-tags
+
+          git clone https://github.com/mvaisakh/gcc-arm.git \
+            prebuilts/gcc/linux-x86/arm/arm-eabi \
+            --depth=1 --single-branch --no-tags
+
+          # Proton Clang
+          git clone https://github.com/kdrag0n/proton-clang.git \
+            clang-bin --depth=1 --single-branch --no-tags
+
+      # ─── 6. KernelSU-Next + SUSFS + KProfiles ────────────────────────────
+      - name: Apply KernelSU-Next, SUSFS, KProfiles
+        run: |
+          set -x
+          cd kernel-workspace
+
+          # ── 6a. KernelSU-Next ────────────────────────────────────────────
+          # setup.sh clones KernelSU-Next and creates drivers/kernelsu symlink.
+          # The "error: pathspec 'next'" message is non-fatal: the script falls
+          # back to the default branch automatically.
+          cd common
+          curl -LSs \
+            "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s next || true
+
+          if [ ! -d "drivers/kernelsu" ] && [ ! -L "drivers/kernelsu" ]; then
+            echo "ERROR: KernelSU-Next setup failed — drivers/kernelsu missing."
+            ls -la drivers/ | grep kernel || true
+            exit 1
+          fi
+          echo "[OK] drivers/kernelsu -> $(readlink drivers/kernelsu 2>/dev/null || echo '(directory)')"
+          cd ..
+
+          # ── 6b. SUSFS patches ────────────────────────────────────────────
+          rm -rf susfs4ksu
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git \
+            -b gki-android13-5.15 --depth=1
+
+          echo "=== kernel_patches/ ==="
+          ls -la susfs4ksu/kernel_patches/
+          echo "=== kernel_patches/KernelSU/ ==="
+          ls -la susfs4ksu/kernel_patches/KernelSU/ 2>/dev/null || \
+            echo "(not found)"
+
+          cd common
+
+          # Copy new SUSFS source files
+          cp ../susfs4ksu/kernel_patches/fs/*.c       fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/*.h include/linux/
+
+          # Main GKI kernel patch
+          SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ \
+            -maxdepth 1 -name "*5.15*.patch" | head -n 1)
+          if [ -z "$SUSFS_PATCH" ]; then
+            echo "ERROR: main SUSFS patch for 5.15 not found."
+            ls -la ../susfs4ksu/kernel_patches/
+            exit 1
+          fi
+          echo "Applying: $SUSFS_PATCH"
+          patch -p1 < "$SUSFS_PATCH"
+
+          # KernelSU SUSFS enablement patch.
+          # The patch was written for the old KernelSU layout where driver
+          # sources lived under kernel/ inside the repo.  KernelSU-Next keeps
+          # them at the repo root, so strip one extra level with -p2.
+          KSU_PATCH="../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+          if [ -f "$KSU_PATCH" ]; then
+            cd drivers/kernelsu
+            echo "Applying KernelSU SUSFS patch…"
+            # Try -p2 (strips a/kernel/ prefix), fall back to -p1, then force.
+            if patch --dry-run -p2 < "../../$KSU_PATCH" >/dev/null 2>&1; then
+              patch -p2 < "../../$KSU_PATCH"
+              echo "[OK] Applied with -p2."
+            elif patch --dry-run -p1 < "../../$KSU_PATCH" >/dev/null 2>&1; then
+              patch -p1 < "../../$KSU_PATCH"
+              echo "[OK] Applied with -p1."
+            else
+              echo "WARNING: patch does not apply cleanly; forcing (-p2)."
+              patch -p2 --force < "../../$KSU_PATCH" || true
+              echo "Check for *.rej files if the build fails."
+            fi
+            cd ../..
+          else
+            echo "WARNING: $KSU_PATCH not found — skipping."
+          fi
+
+          # ── 6c. KProfiles ────────────────────────────────────────────────
+          # Correct repo: beakthoven/Kprofiles  (not tiann/kprofiles)
+          git clone https://github.com/beakthoven/Kprofiles.git \
+            drivers/misc/kprofiles --depth=1
+
+          # Wire into the build system (guard against double-insertion)
+          if ! grep -q "kprofiles" drivers/misc/Kconfig; then
+            sed -i '/^endmenu/i source "drivers/misc/kprofiles/Kconfig"' \
+              drivers/misc/Kconfig
+          fi
+          if ! grep -q "kprofiles" drivers/misc/Makefile; then
+            echo 'obj-$(CONFIG_KPROFILES) += kprofiles/' \
+              >> drivers/misc/Makefile
+          fi
+
+          # ── 6d. defconfig ────────────────────────────────────────────────
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_NEXT=y"
+            echo "CONFIG_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KPROFILES=y"
+          } >> "$DEFCONFIG"
+          echo "[OK] defconfig updated."
+
+          cd ..   # back to kernel-workspace
+
+      # ─── 7. Build ─────────────────────────────────────────────────────────
+      - name: Build kernel
+        run: |
+          set -x
+          cd kernel-workspace
+
+          export PATH="$(pwd)/clang-bin/bin:\
+          $(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:\
+          $(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:\
+          $PATH"
+
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-elf-
+          export CROSS_COMPILE_ARM32=arm-eabi-
+
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh
+
+          echo "=== Output directory structure ==="
+          find out -maxdepth 3 -type d 2>/dev/null || \
+            echo "(out/ not found)"
+
+      # ─── 8. Locate artifacts ──────────────────────────────────────────────
+      - name: Locate artifacts
+        id: artifacts
+        run: |
+          cd kernel-workspace
+          DIST_DIR=$(find out -name "dist" -type d 2>/dev/null | head -n 1)
+          if [ -z "$DIST_DIR" ]; then
+            DIST_DIR=$(find out -name "Image" 2>/dev/null \
+              -exec dirname {} \; | head -n 1)
+          fi
+          echo "dist_dir=$DIST_DIR" >> "$GITHUB_OUTPUT"
+          echo "=== Artifacts in $DIST_DIR ==="
+          ls -lh "$DIST_DIR" 2>/dev/null || echo "(empty or not found)"
+
+      # ─── 9. Upload ────────────────────────────────────────────────────────
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-arm64
+          path: kernel-workspace/${{ steps.artifacts.outputs.dist_dir }}/
+          if-no-files-found: error
+          retention-days: 7
