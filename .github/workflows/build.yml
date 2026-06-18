@@ -1,7 +1,7 @@
 name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Явный триггер кнопки запуска
 
 jobs:
   build:
@@ -22,80 +22,110 @@ jobs:
     - name: Install Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git python3 ccache
+        sudo apt-get install -y bc bison build-essential flex libssl-dev libelf-dev xz-utils curl git python3 ccache patch
 
     - name: Clone GKI Source and Utilities
       run: |
         mkdir -p kernel-workspace
         cd kernel-workspace
+
+        # Клонируем ваш форк ядра (hfdem -> fuxilover), ветка android13-5.15
         git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
+
+        # Скачиваем официальные скрипты сборки от Google
         git clone https://android.googlesource.com/kernel/build --depth=1
+
+        # Скачиваем GCC кросс-компиляторы
         git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1
         git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1
+
+        # Скачиваем Proton Clang
         git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
         cd kernel-workspace
-        git clone https://github.com/WildKernels/GKI_KernelSU_SUSFS.git wild_repo --depth=1
-        
-        rm -rf common/drivers/kernelsu
-        mkdir -p common/drivers/kernelsu
-        
-        if [ -d "wild_repo/KernelSU-Next" ]; then
-            cp -r wild_repo/KernelSU-Next/* common/drivers/kernelsu/
-        else
-            git clone https://github.com/rifsxd/KernelSU-Next.git common/drivers/kernelsu --depth=1
+
+        # 1. Интеграция KernelSU Next.
+        # ИСПРАВЛЕНО: используем стабильную ветку "next" (а не экспериментальный
+        # ярлык "next-susfs", который, похоже, сейчас недоступен по этому пути
+        # и был источником ошибки exit code 127). SUSFS подключаем отдельным
+        # явным патчем ниже — это надёжнее, так как не зависит от того,
+        # существует ли сейчас отдельная "all-in-one" ветка у KernelSU-Next.
+        cd common
+        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+        cd ..
+
+        # 2. Загрузка патчей SUSFS с GitLab (репозиторий simonpunk, не GitHub).
+        rm -rf susfs4ksu
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 --depth=1
+
+        echo "=== Содержимое kernel_patches (для сверки, если имя патча изменится) ==="
+        ls -la susfs4ksu/kernel_patches/
+        echo "=== Содержимое kernel_patches/KernelSU ==="
+        ls -la susfs4ksu/kernel_patches/KernelSU/ 2>/dev/null || true
+
+        cd common
+
+        # Копируем новые файлы SUSFS (fs/susfs.c, include/linux/susfs.h и т.п.)
+        cp ../susfs4ksu/kernel_patches/fs/*.c fs/
+        cp ../susfs4ksu/kernel_patches/include/linux/*.h include/linux/
+
+        # Применяем основной патч ядра под нужную GKI-ветку
+        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -maxdepth 1 -name "*5.15*.patch" | head -n 1)
+        if [ -z "$SUSFS_PATCH" ]; then
+          echo "ОШИБКА: не найден основной SUSFS-патч под gki-android13-5.15. Сверьтесь со списком файлов выше."
+          exit 1
         fi
-        
-        grep -q "kernelsu" common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
-        grep -q "kernelsu" common/drivers/Makefile || echo "obj-y += drivers/kernelsu/" >> common/drivers/Makefile
-        
-        mkdir -p susfs_source
-        git clone https://github.com/sidex15/susfs4ksu.git susfs_source --depth=1
-        
-        cp susfs_source/kernel_patches/fs/susfs.c common/fs/
-        cp susfs_source/kernel_patches/include/linux/susfs.h common/include/linux/
-        
-        WILD_PATCH_515=$(find wild_repo/ -name "*5.15*.patch" | head -n 1)
-        if [ -f "$WILD_PATCH_515" ]; then
-            cd common && patch -p1 < "../$WILD_PATCH_515" || true && cd ..
+        echo "Применяю основной SUSFS-патч: $SUSFS_PATCH"
+        patch -p1 < "$SUSFS_PATCH"
+
+        # Применяем отдельный патч, который включает поддержку SUSFS внутри
+        # самого драйвера KernelSU-Next (drivers/kernelsu — это симлинк,
+        # созданный setup.sh на предыдущем шаге).
+        KSU_SUSFS_PATCH="../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+        if [ -f "$KSU_SUSFS_PATCH" ]; then
+          cd drivers/kernelsu
+          echo "Применяю патч включения SUSFS в KernelSU: $KSU_SUSFS_PATCH"
+          patch -p1 < "../../$KSU_SUSFS_PATCH" || echo "ПРЕДУПРЕЖДЕНИЕ: патч не применился чисто, возможно несовместимость версий — проверьте *.rej файлы вручную."
+          cd ../..
         else
-            STANDARD_515=$(find susfs_source/kernel_patches/ -name "*5.15*.patch" | head -n 1)
-            cd common && patch -p1 < "../$STANDARD_515" || true && cd ..
+          echo "ПРЕДУПРЕЖДЕНИЕ: $KSU_SUSFS_PATCH не найден, пропускаю (сверьтесь со списком файлов выше)."
         fi
-        
-        KSU_PATCH=$(find wild_repo/ -name "*ksu*.patch" -o -name "*next*.patch" | head -n 1)
-        if [ -f "$KSU_PATCH" ]; then
-            cd common/drivers/kernelsu && patch -p1 < "../../../$KSU_PATCH" || true && cd ../../..
-        else
-            STANDARD_KSU=$(find susfs_source/ksu_patches/ -name "*next*.patch" -o -name "*ksu*.patch" | head -n 1)
-            cd common/drivers/kernelsu && patch -p1 < "../../../$STANDARD_KSU" || true && cd ../../..
-        fi
+
+        # 3. Подключение KProfiles как исходного драйвера.
+        git clone https://github.com/beakthoven/Kprofiles.git drivers/misc/kprofiles --depth=1
+        sed -i '/^endmenu/i source "drivers/misc/kprofiles/Kconfig"' drivers/misc/Kconfig
+        echo 'obj-$(CONFIG_KPROFILES) += kprofiles/' >> drivers/misc/Makefile
+
+        # 4. Настройка gki_defconfig
+        DEFCONFIG="arch/arm64/configs/gki_defconfig"
+        echo "CONFIG_KSU=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
+        echo "CONFIG_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+        echo "CONFIG_KPROFILES=y" >> $DEFCONFIG
 
     - name: Execute GKI Build Process
       run: |
         cd kernel-workspace
-        
-        # Инжектируем настройки прямо перед компиляцией в абсолютный путь
-        echo "CONFIG_KSU=y" >> common/arch/arm64/configs/gki_defconfig
-        echo "CONFIG_KSU_NEXT=y" >> common/arch/arm64/configs/gki_defconfig
-        echo "CONFIG_SUSFS=y" >> common/arch/arm64/configs/gki_defconfig
-        echo "CONFIG_KSU_SUSFS=y" >> common/arch/arm64/configs/gki_defconfig
-        echo "CONFIG_KPROFILES=y" >> common/arch/arm64/configs/gki_defconfig
-        
+
+        # Настройка путей компилятора
         export PATH="$(pwd)/clang-bin/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-elf-
         export CROSS_COMPILE_ARM32=arm-eabi-
-        
-        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
+
+        BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+
+        echo "=== Реальная структура out/ после сборки ==="
+        find out -maxdepth 2 -type d
 
     - name: Upload Compiled Kernel Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: GKI-Kernel-Xiaomi13
         path: |
-          kernel-workspace/out/android14-5.15/dist/Image
-          kernel-workspace/out/android14-5.15/dist/Image.lz4
-          kernel-workspace/out/android14-5.15/dist/Image.gz
+          kernel-workspace/out/android13-5.15/dist/Image
+          kernel-workspace/out/android13-5.15/dist/Image.lz4
+          kernel-workspace/out/android13-5.15/dist/Image.gz
