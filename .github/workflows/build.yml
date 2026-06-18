@@ -6,7 +6,7 @@ on:
 jobs:
   build_kernel:
     runs-on: ubuntu-latest
-    
+
     steps:
     # ── 1. СКАЧИВАЕМ ИСХОДНИКИ ЯДРА ──────────────────────────────────────────
     - name: Checkout Kernel Source
@@ -37,21 +37,21 @@ jobs:
           curl git python3 ccache patch \
           cpio rsync
 
-    # ── 4. ПОДГОТОВКА СТРУКТУРЫ, KERNELSU-NEXT И KPROFILES ───────────────────
-    - name: Setup Toolchains, KernelSU-Next and KProfiles
+    # ── 4. ПОДГОТОВКА СТРУКТУРЫ И KERNELSU-NEXT ──────────────────────────────
+    - name: Setup Toolchains and KernelSU-Next
       run: |
         set -x
         
         # 1. Создаем чистый воркспейс для сборщика Google
         mkdir -p kernel-workspace/common
         
-        # 2. Безопасно перемещаем исходники ядра в kernel-workspace/common, избегая зацикливания папок
+        # 2. Безопасно перемещаем исходники ядра в kernel-workspace/common
         find . -maxdepth 1 ! -name '.' ! -name 'kernel-workspace' -exec mv {} kernel-workspace/common/ \;
 
         cd kernel-workspace
         
         echo "=== Cloning Build Scripts and Toolchains ==="
-        # Скрипты сборки от Google
+        # Скрипты сборки от Google (клонируются рядом с папкой common)
         git clone https://android.googlesource.com/kernel/build --branch master-kernel-build-2022 --depth=1 --single-branch
 
         # Скачиваем компиляторы (в корень воркспейса)
@@ -73,22 +73,6 @@ jobs:
           echo "ERROR: KernelSU-Next installation failed!"
           exit 1
         fi
-
-        echo "=== Integrating KProfiles ==="
-        # Используем стабильное и открытое зеркало KProfiles вместо недоступного tiann/kprofiles
-        git clone https://github.com/Akipe/kprofiles.git drivers/kprofiles --depth=1
-        
-        # Прописываем KProfiles в общую систему сборки драйверов ядра
-        if ! grep -q "kprofiles" drivers/Makefile; then
-          echo "obj-y += kprofiles/" >> drivers/Makefile
-        fi
-        
-        if ! grep -q "kprofiles" drivers/Kconfig; then
-          sed -i '/endmenu/i source "drivers/kprofiles/Kconfig"' drivers/Kconfig
-        fi
-
-        # Включаем KProfiles в дефолтной конфигурации нашего GKI ядра
-        echo "CONFIG_KPROFILES=y" >> arch/arm64/configs/gki_defconfig
 
         cd ..
         echo "=== Workspace Ready ==="
@@ -119,8 +103,57 @@ jobs:
         export READELF=llvm-readelf
         export STRIP=llvm-strip
         
+        # 4. ВЫРЕЗАЕМ ПРОВЕРКУ NDK ИЗ КОНФИГУРАЦИИ СБОРКИ
+        sed -i '/NDK_TRIPLE/d' common/build.config.gki.aarch64
+        
+        # На всякий случай сбрасываем в окружении bash
+        unset NDK_TRIPLE
+        export USES_NDK=0
+        
         # Даем права на исполнение главному билд-скрипту Google
         chmod +x build/build.sh
         
-        # 4. Запуск сборки с явным указанием конфигурационного файла GKI ядра
+        # 5. Запуск сборки с явным указанием конфигурационного файла GKI ядра
         BUILD_CONFIG=common/build.config.gki.aarch64 ./build/build.sh
+
+    # ── 6. КЛОНИРОВАНИЕ И СБОРКА SUKISU KERNELPATCH ПАТЧЕРА ────────────────
+    - name: Clone and Build SukiSU KernelPatch
+      run: |
+        # Клонируем официальный репозиторий патчера для KPM
+        git clone --recursive https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch.git kp-patcher
+        cd kp-patcher
+        
+        # Собираем kpatch под Linux-хост CI (архитектура x86_64)
+        make -j$(nproc)
+        
+        # Создаем папку бинов в воркспейсе ядра, если её нет, и копируем kpatch туда
+        mkdir -p ../kernel-workspace/out/bin
+        cp out/kpatch ../kernel-workspace/out/bin/kpatch
+        
+        cd ../kernel-workspace/out/bin
+        chmod +x kpatch
+        ./kpatch --version || true
+
+    # ── 7. СТАТИЧЕСКИЙ ПАТЧИНГ ОБРАЗА ЯДРА ПОД KPM ─────────────────────────
+    - name: Patch Kernel Image with KernelPatch for SukiSU KPM
+      run: |
+        cd kernel-workspace
+        
+        # Пытаемся автоматически найти собранный Image в директориях out/
+        KERNEL_IMAGE=$(find out/ -type f -name "Image" | head -n 1)
+        KPATCH_BIN="$(pwd)/out/bin/kpatch"
+        
+        if [ -n "$KERNEL_IMAGE" ] && [ -f "$KERNEL_IMAGE" ]; then
+          echo "[+] Найдено собранное ядро по пути: $KERNEL_IMAGE"
+          echo "[+] Начинаем патчинг под SukiSU KPM..."
+          
+          # Вызов kpatch для статической модификации
+          $KPATCH_BIN patch -i "$KERNEL_IMAGE" -o "${KERNEL_IMAGE}-patched"
+          
+          # Заменяем оригинальное ядро пропатченной версией
+          mv "${KERNEL_IMAGE}-patched" "$KERNEL_IMAGE"
+          echo "[+] Ядро успешно пропатчено!"
+        else
+          echo "[-] Ошибка: Исходный образ ядра (Image) не найден в папке out/"
+          exit 1
+        fi
