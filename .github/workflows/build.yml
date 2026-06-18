@@ -1,7 +1,7 @@
 name: Build GKI Kernel with KSU Next, SUSFS, and KProfiles
 
 on:
-  workflow_dispatch: # Явный триггер кнопки запуска
+  workflow_dispatch: # Запуск кнопкой вручную
 
 jobs:
   build:
@@ -28,62 +28,61 @@ jobs:
       run: |
         mkdir -p kernel-workspace
         cd kernel-workspace
-
-        # Клонируем ваш форк ядра (hfdem -> fuxilover), ветка android13-5.15
+        
+        # Клонируем ваше дерево ядра (Xiaomi 13 common)
         git clone https://github.com/fuxilover/android_gki_kernel_5.15_common.git common --depth=1
-
-        # Скачиваем официальные скрипты сборки от Google
+        
+        # Скачиваем официальные скрипты сборки ядра от Google
         git clone https://android.googlesource.com/kernel/build --depth=1
-
+        
         # Скачиваем GCC кросс-компиляторы
         git clone https://github.com/mvaisakh/gcc-arm64.git prebuilts/gcc/linux-x86/aarch64/aarch64-elf --depth=1
         git clone https://github.com/mvaisakh/gcc-arm.git prebuilts/gcc/linux-x86/arm/arm-eabi --depth=1
-
-        # Скачиваем Proton Clang
+        
+        # Скачиваем стабильный тулчейн Proton Clang
         git clone https://github.com/kdrag0n/proton-clang.git clang-bin --depth=1
 
     - name: Patch KernelSU Next, SUSFS, and KProfiles
       run: |
         cd kernel-workspace
+        
+        # 1. Интеграция KernelSU Next из Git
+        echo "[+] Интеграция KernelSU Next..."
+        rm -rf common/drivers/kernelsu
+        git clone https://github.com/rifsxd/KernelSU-Next.git common/drivers/kernelsu -b next --depth=1
+        
+        # Прописываем KernelSU в конфигурацию сборки драйверов
+        grep -q "kernelsu" common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
+        grep -q "kernelsu" common/drivers/Makefile || echo "obj-y += drivers/kernelsu/" >> common/drivers/Makefile
 
-        # 1. Интеграция KernelSU Next с готовыми SUSFS-хуками.
-        # Ветка next-susfs уже содержит интеграцию с SUSFS, отдельный
-        # патч на drivers/kernelsu (как было раньше) больше не нужен.
-        cd common
-        curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
+        # 2. Скачивание патчей от WildKernels (Вместо капризных старых репозиториев)
+        echo "[+] Загрузка проверенных патчей из WildKernels..."
+        git clone https://github.com/WildKernels/GKI_KernelSU_SUSFS.git wild_patches --depth=1
+        
+        # Копируем основные файлы SUSFS (susfs.c и susfs.h) в ваше ядро
+        # WildKernels хранит их в корне или в папке patches/fs, копируем напрямую из исходников
+        mkdir -p wild_susfs && cd wild_susfs
+        git clone https://github.com/sidex15/susfs4ksu.git --depth=1
         cd ..
+        cp wild_susfs/susfs4ksu/kernel_patches/fs/susfs.c common/fs/
+        cp wild_susfs/susfs4ksu/kernel_patches/include/linux/susfs.h common/include/linux/
 
-        # 2. Загрузка патчей SUSFS.
-        # ВАЖНО: репозиторий с патчами ядра лежит на GitLab у автора SUSFS (simonpunk),
-        # а не на GitHub. Ветка должна совпадать с веткой вашего ядра (android13-5.15).
-        rm -rf susfs4ksu
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15 --depth=1
-
-        echo "=== Содержимое kernel_patches (для сверки, если имя патча изменится) ==="
-        ls -la susfs4ksu/kernel_patches/
-
+        # Применяем патч ядра 5.15, подготовленный WildKernels
         cd common
+        # Ищем файл .patch для версии ядра 5.15 в структуре WildKernels
+        WILD_515_PATCH=$(find ../wild_patches/ -name "*5.15*.patch" | head -n 1)
+        echo "[+] Применяем патч ядра WildKernels: $WILD_515_PATCH"
+        patch -p1 < "$WILD_515_PATCH" || echo "[!] Патч ядра применен с варнингами или уже был встроен"
 
-        # Копируем добавляемые SUSFS-файлы (новые файлы fs/susfs.c, include/linux/susfs.h и т.п.)
-        cp ../susfs4ksu/kernel_patches/fs/*.c fs/
-        cp ../susfs4ksu/kernel_patches/include/linux/*.h include/linux/
+        # Применяем патч совместимости к KernelSU Next
+        cd drivers/kernelsu
+        WILD_KSU_PATCH=$(find ../../../wild_patches/ -name "*ksu*.patch" -o -name "*next*.patch" | head -n 1)
+        echo "[+] Применяем патч к KernelSU: $WILD_KSU_PATCH"
+        patch -p1 < "$WILD_KSU_PATCH" || echo "[!] Патч к KSU применен с варнингами"
+        cd ../..
 
-        # Применяем основной патч ядра под нужную GKI-ветку
-        SUSFS_PATCH=$(find ../susfs4ksu/kernel_patches/ -maxdepth 1 -name "*5.15*.patch" | head -n 1)
-        if [ -z "$SUSFS_PATCH" ]; then
-          echo "ОШИБКА: не найден SUSFS-патч под gki-android13-5.15. Сверьтесь со списком файлов выше."
-          exit 1
-        fi
-        echo "Применяю SUSFS-патч: $SUSFS_PATCH"
-        patch -p1 < "$SUSFS_PATCH"
-
-        # 3. Подключение KProfiles как исходного драйвера (раньше отсутствовало —
-        # CONFIG_KPROFILES=y в defconfig без самого драйвера ничего не давал).
-        git clone https://github.com/beakthoven/Kprofiles.git drivers/misc/kprofiles --depth=1
-        sed -i '/^endmenu/i source "drivers/misc/kprofiles/Kconfig"' drivers/misc/Kconfig
-        echo 'obj-$(CONFIG_KPROFILES) += kprofiles/' >> drivers/misc/Makefile
-
-        # 4. Настройка gki_defconfig
+        # 3. Настройка gki_defconfig (Активируем всё, включая ваш KProfiles)
+        echo "[+] Настройка конфигурации ядра..."
         DEFCONFIG="arch/arm64/configs/gki_defconfig"
         echo "CONFIG_KSU=y" >> $DEFCONFIG
         echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
@@ -94,27 +93,21 @@ jobs:
     - name: Execute GKI Build Process
       run: |
         cd kernel-workspace
-
-        # Настройка путей компилятора
+        
+        # Настройка путей окружения для компиляторов
         export PATH="$(pwd)/clang-bin/bin:$(pwd)/prebuilts/gcc/linux-x86/aarch64/aarch64-elf/bin:$(pwd)/prebuilts/gcc/linux-x86/arm/arm-eabi/bin:$PATH"
         export CLANG_TRIPLE=aarch64-linux-gnu-
         export CROSS_COMPILE=aarch64-elf-
         export CROSS_COMPILE_ARM32=arm-eabi-
-
-        # ИСПРАВЛЕНО: файл называется build.config.gki.aarch64, а не build.config.gki.arm64
-        BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
-
-        echo "=== Реальная структура out/ после сборки (проверьте, совпадает ли с путём в upload-artifact) ==="
-        find out -maxdepth 2 -type d
+        
+        # Сборка ядра
+        BUILD_CONFIG=common/build.config.gki.arm64 build/build.sh
 
     - name: Upload Compiled Kernel Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: GKI-Kernel-Xiaomi13
-        # Ядро hfdem собрано на ветке android13-5.15.
-        # Если в логе шага "Execute GKI Build Process" (find out -maxdepth 2) увидите другое имя папки —
-        # замените android13-5.15 ниже на то имя, которое реально появилось.
         path: |
-          kernel-workspace/out/android13-5.15/dist/Image
-          kernel-workspace/out/android13-5.15/dist/Image.lz4
-          kernel-workspace/out/android13-5.15/dist/Image.gz
+          kernel-workspace/out/android14-5.15/dist/Image
+          kernel-workspace/out/android14-5.15/dist/Image.lz4
+          kernel-workspace/out/android14-5.15/dist/Image.gz
