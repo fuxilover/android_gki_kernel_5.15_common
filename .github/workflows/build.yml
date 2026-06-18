@@ -1,3 +1,18 @@
+name: Build Kernel (arm64)
+
+# Определяем, когда запускать сборку
+on:
+  workflow_dispatch: # ЭТОТ БЛОК ОБЯЗАТЕЛЕН для ручного запуска кнопкой!
+  
+  # Здесь могут оставаться ваши старые триггеры, например:
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  build_job:
+    runs-on: ubuntu-latest
+    steps:
+      # ... ваши шаги (checkout, apt-get, клонирование ядра и т.д.)
 - name: Clone Toolchains, Setup KernelSU-Next and Patch SUSFS
       run: |
         # Включаем строгий режим: падать при любой ошибке, логировать команды
