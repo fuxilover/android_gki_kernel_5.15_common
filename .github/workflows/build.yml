@@ -27,7 +27,7 @@ jobs:
         git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
         
          - name: 💉 Inject SUSFS Patch (On-the-fly)
-      run: |
+        run: |
         echo "Интеграция SUSFS в исходный код ядра..."
         
         # Скачиваем официальные патчи simonpunk СТРОГО для ветки Android 13 (GKI 5.15)
